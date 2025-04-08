@@ -67,6 +67,17 @@ class _QRScannerPageState extends State<QRScannerPage> {
               }
             },
           ),
+          // Add scanning frame overlay
+          Center(
+            child: Container(
+              width: 250,
+              height: 250,
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.white, width: 2),
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+          ),
           if (isProcessing) const Center(child: CircularProgressIndicator()),
           if (!showDetails && !isProcessing)
             Align(
@@ -169,23 +180,34 @@ class _QRScannerPageState extends State<QRScannerPage> {
     }
     String current = url;
     int hops = 0;
-    while (true) {
+    Set<String> visitedUrls = {current};
+
+    while (hops < 10) {
+      // Limit redirects to prevent infinite loops
       try {
-        final response = await http.head(
+        final response = await http.get(
+          // Changed from head to get for better compatibility
           Uri.parse(current),
-          headers: {'User-Agent': 'curl/7.64.1'},
+          headers: {
+            'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+          },
         );
         final location = response.headers['location'];
         if ((response.isRedirect ||
                 response.statusCode == 301 ||
                 response.statusCode == 302) &&
             location != null) {
-          current = location;
+          final nextUrl = Uri.parse(location).toString();
+          if (visitedUrls.contains(nextUrl)) break; // Prevent redirect loops
+          visitedUrls.add(nextUrl);
+          current = nextUrl;
           hops++;
         } else {
           break;
         }
-      } catch (_) {
+      } catch (e) {
+        print('Error resolving URL: $e');
         break;
       }
     }
@@ -312,45 +334,68 @@ class _QRScannerPageState extends State<QRScannerPage> {
         });
       });
       return;
-    }
+    } else {
+      try {
+        final picker = ImagePicker();
+        final picked = await picker.pickImage(
+          source: ImageSource.gallery,
+          maxWidth: 1920,
+          maxHeight: 1920,
+          imageQuality: 85,
+        );
 
-    final picker = ImagePicker();
-    final picked = await picker.pickImage(source: ImageSource.gallery);
-    if (picked != null) {
-      setState(() => isProcessing = true);
-      final inputImage = InputImage.fromFilePath(picked.path);
-      final scanner = BarcodeScanner();
-      final barcodes = await scanner.processImage(inputImage);
-      await scanner.close();
-      if (!mounted) return;
-      setState(() => isProcessing = false);
-      if (barcodes.isEmpty) {
+        if (picked != null) {
+          setState(() => isProcessing = true);
+          final inputImage = InputImage.fromFilePath(picked.path);
+          final scanner = BarcodeScanner();
+          final barcodes = await scanner.processImage(inputImage);
+          await scanner.close();
+
+          if (!mounted) return;
+          setState(() => isProcessing = false);
+
+          if (barcodes.isEmpty) {
+            if (!mounted) return;
+            showDialog(
+              context: context,
+              builder:
+                  (_) => const AlertDialog(
+                    title: Text('QR-код не найден'),
+                    content: Text('Попробуйте другое изображение.'),
+                  ),
+            );
+            return;
+          }
+
+          final rawValue = barcodes.first.rawValue;
+          if (rawValue != null) {
+            setState(() => isProcessing = true);
+            final realUrl = await resolveFinalUrl(rawValue);
+            final safe = checkIfUrlIsSafe(realUrl);
+            final info = await fetchDomainInfo(realUrl);
+            if (!mounted) return;
+            setState(() {
+              scannedData = rawValue;
+              finalUrl = realUrl;
+              isSafe = safe;
+              showDetails = true;
+              domainInfo = info;
+              isProcessing = false;
+            });
+            cameraController.stop();
+          }
+        }
+      } catch (e) {
+        print('Error picking image: $e');
+        if (!mounted) return;
         showDialog(
           context: context,
           builder:
               (_) => const AlertDialog(
-                title: Text('QR-код не найден'),
-                content: Text('Попробуйте другое изображение.'),
+                title: Text('Ошибка'),
+                content: Text('Не удалось выбрать изображение.'),
               ),
         );
-        return;
-      }
-      final rawValue = barcodes.first.rawValue;
-      if (rawValue != null) {
-        setState(() => isProcessing = true);
-        final realUrl = await resolveFinalUrl(rawValue);
-        final safe = checkIfUrlIsSafe(realUrl);
-        final info = await fetchDomainInfo(realUrl);
-        if (!mounted) return;
-        setState(() {
-          scannedData = rawValue;
-          finalUrl = realUrl;
-          isSafe = safe;
-          showDetails = true;
-          domainInfo = info;
-          isProcessing = false;
-        });
-        cameraController.stop();
       }
     }
   }
