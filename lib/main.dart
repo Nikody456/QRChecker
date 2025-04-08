@@ -9,6 +9,8 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:universal_html/html.dart' as html;
 import 'package:logging/logging.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'database.dart';
 
 // Initialize logger
 final _logger = Logger('QRChecker');
@@ -52,6 +54,29 @@ class _QRScannerPageState extends State<QRScannerPage> {
   bool isFlashOn = false;
   bool isBackCamera = true;
   Rect? qrCodeRect;
+  bool showUrl = false;
+  final dbHelper = DatabaseHelper();
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeDatabase();
+  }
+
+  Future<void> _initializeDatabase() async {
+    await dbHelper.updatePhishingDatabase();
+  }
+
+  Future<bool?> checkIfUrlIsSafe(String url) async {
+    // Проверяем наличие в базе фишинговых сайтов
+    final isPhishing = await dbHelper.isPhishingSite(url);
+    if (isPhishing) return false;
+
+    // Проверяем количество редиректов
+    if (redirectCount > 3) return null; // null означает "требует осторожности"
+
+    return true;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -90,7 +115,7 @@ class _QRScannerPageState extends State<QRScannerPage> {
                 });
                 
                 final realUrl = await resolveFinalUrl(rawValue);
-                final safe = checkIfUrlIsSafe(realUrl);
+                final safe = await checkIfUrlIsSafe(realUrl);
                 final info = await fetchDomainInfo(realUrl);
                 if (!mounted) return;
                 setState(() {
@@ -197,6 +222,9 @@ class _QRScannerPageState extends State<QRScannerPage> {
   }
 
   Widget _buildDetailsPanel() {
+    final isSuspicious = isSafe == false;
+    final isCaution = isSafe == null;
+
     return Container(
       margin: const EdgeInsets.only(top: 50),
       padding: const EdgeInsets.all(16),
@@ -207,13 +235,41 @@ class _QRScannerPageState extends State<QRScannerPage> {
       child: ListView(
         padding: EdgeInsets.zero,
         children: [
-          Text(
-            isSafe == true ? '✅ Ссылка безопасна' : '🚨 Подозрительная ссылка',
-            style: GoogleFonts.roboto(
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-              color: isSafe == true ? Colors.green : Colors.red,
-            ),
+          Row(
+            children: [
+              Icon(
+                isSuspicious
+                    ? Icons.dangerous
+                    : isCaution
+                        ? Icons.warning
+                        : Icons.check_circle,
+                color: isSuspicious
+                    ? Colors.red
+                    : isCaution
+                        ? Colors.amber
+                        : Colors.green,
+                size: 32,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  isSuspicious
+                      ? '🚨 Опасная ссылка!'
+                      : isCaution
+                          ? '⚠️ Переходить с осторожностью'
+                          : '✅ Ссылка безопасна',
+                  style: GoogleFonts.roboto(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: isSuspicious
+                        ? Colors.red
+                        : isCaution
+                            ? Colors.amber
+                            : Colors.green,
+                  ),
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 16),
           _buildInfoCard(
@@ -222,11 +278,35 @@ class _QRScannerPageState extends State<QRScannerPage> {
           ),
           if (finalUrl != null && finalUrl != scannedData) ...[
             const SizedBox(height: 12),
-            _buildInfoCard(
-              title: 'Реальный адрес назначения:',
-              content: finalUrl!,
-              isUrl: true,
-            ),
+            if (!showUrl)
+              ElevatedButton(
+                onPressed: () => setState(() => showUrl = true),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.white.withValues(alpha: 0.1 * 255),
+                  foregroundColor: Colors.white,
+                ),
+                child: const Text('Показать ссылку'),
+              )
+            else
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildInfoCard(
+                    title: 'Реальный адрес назначения:',
+                    content: finalUrl!,
+                    isUrl: true,
+                  ),
+                  const SizedBox(height: 8),
+                  ElevatedButton(
+                    onPressed: () => _launchUrl(finalUrl!),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blue,
+                      foregroundColor: Colors.white,
+                    ),
+                    child: const Text('Перейти по ссылке'),
+                  ),
+                ],
+              ),
             const SizedBox(height: 8),
             Text(
               'Редиректов: $redirectCount',
@@ -255,6 +335,7 @@ class _QRScannerPageState extends State<QRScannerPage> {
                 showDetails = false;
                 domainInfo = null;
                 qrCodeRect = null;
+                showUrl = false;
               });
               cameraController.start();
             },
@@ -313,13 +394,6 @@ class _QRScannerPageState extends State<QRScannerPage> {
     );
   }
 
-  bool checkIfUrlIsSafe(String url) {
-    final lower = url.toLowerCase();
-    return !lower.contains('bit.ly') &&
-        !lower.contains('http://') &&
-        !RegExp(r'^https?:\\/\\/\\d{1,3}(\\.\\d{1,3}){3}').hasMatch(lower);
-  }
-
   Future<String> resolveFinalUrl(String url) async {
     if (resolvedLinksCache.containsKey(url)) {
       redirectCount = 1;
@@ -366,43 +440,102 @@ class _QRScannerPageState extends State<QRScannerPage> {
     final uri = Uri.parse(url);
     final domain = uri.host;
     final info = <String, String>{};
+    
+    // Проверяем, является ли домен локальным или специальным
+    if (domain.contains('localhost') || 
+        domain.contains('local') || 
+        domain.startsWith('192.') || 
+        domain.startsWith('127.') ||
+        domain.startsWith('10.') ||
+        domain.startsWith('172.') ||
+        domain.startsWith('169.254.')) {
+      info['IP'] = 'Локальный адрес';
+      info['Страна'] = 'Локальная сеть';
+      info['Хостинг'] = 'Локальная сеть';
+      return info;
+    }
+
+    // Запрос к ipwho.is
     try {
-      final ipRes = await http.get(Uri.parse('https://ipwho.is/$domain'));
+      final ipRes = await http.get(
+        Uri.parse('https://ipwho.is/$domain'),
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'QRChecker/1.0',
+        },
+      ).timeout(const Duration(seconds: 5));
+
       if (ipRes.statusCode == 200) {
         final data = jsonDecode(ipRes.body);
         final ip = data['ip']?.toString();
-        if (ip == null ||
-            ip.startsWith('192.') ||
-            ip.startsWith('127.') ||
-            ip == '95.24.164.32') {
-          info['IP'] = 'Не удалось определить';
-          info['Страна'] = 'Не удалось определить';
-          info['Хостинг'] = 'Не удалось определить';
-        } else {
-          info['IP'] = ip;
-          info['Страна'] = data['country'] ?? 'Неизвестно';
-          info['Хостинг'] = data['connection']?['isp'] ?? 'Неизвестно';
-        }
-      }
-    } catch (_) {}
+        final country = data['country']?.toString();
+        final isp = data['connection']?['isp']?.toString();
 
+        if (ip != null && ip.isNotEmpty) {
+          info['IP'] = ip;
+          info['Страна'] = country ?? 'Неизвестно';
+          info['Хостинг'] = isp ?? 'Неизвестно';
+        } else {
+          info['IP'] = 'Не удалось определить';
+          info['Страна'] = 'Неизвестно';
+          info['Хостинг'] = 'Неизвестно';
+        }
+      } else {
+        _logger.warning('ipwho.is вернул статус ${ipRes.statusCode}');
+        info['IP'] = 'Ошибка запроса';
+        info['Страна'] = 'Неизвестно';
+        info['Хостинг'] = 'Неизвестно';
+      }
+    } catch (e) {
+      _logger.warning('Ошибка при запросе к ipwho.is: $e');
+      info['IP'] = 'Ошибка запроса';
+      info['Страна'] = 'Неизвестно';
+      info['Хостинг'] = 'Неизвестно';
+    }
+
+    // Запрос к rdap.org
     try {
       final rdapRes = await http.get(
         Uri.parse('https://rdap.org/domain/$domain'),
-      );
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'QRChecker/1.0',
+        },
+      ).timeout(const Duration(seconds: 5));
+
       if (rdapRes.statusCode == 200) {
         final data = jsonDecode(rdapRes.body);
-        final registration = (data['events'] as List?)?.firstWhere(
-          (e) => e['eventAction'] == 'registration',
-          orElse: () => null,
-        );
-        if (registration != null) {
-          info['Создан'] =
-              registration['eventDate']?.toString().split('T').first ??
-              'Неизвестно';
+        final events = data['events'] as List?;
+        if (events != null) {
+          final registration = events.firstWhere(
+            (e) => e['eventAction'] == 'registration',
+            orElse: () => null,
+          );
+          if (registration != null) {
+            final date = registration['eventDate']?.toString();
+            if (date != null) {
+              info['Создан'] = date.split('T').first;
+            } else {
+              info['Создан'] = 'Неизвестно';
+            }
+          } else {
+            info['Создан'] = 'Неизвестно';
+          }
+        } else {
+          info['Создан'] = 'Неизвестно';
         }
+      } else {
+        _logger.warning('rdap.org вернул статус ${rdapRes.statusCode}');
+        info['Создан'] = 'Ошибка запроса';
       }
-    } catch (_) {}
+    } catch (e) {
+      _logger.warning('Ошибка при запросе к rdap.org: $e');
+      info['Создан'] = 'Ошибка запроса';
+    }
+
+    // Добавляем дополнительную информацию
+    info['TLD'] = domain.split('.').last;
+    info['Протокол'] = url.startsWith('https') ? 'HTTPS' : 'HTTP';
 
     final suspiciousWords = [
       'login',
@@ -415,11 +548,7 @@ class _QRScannerPageState extends State<QRScannerPage> {
       'wallet',
     ];
     final foundWords = suspiciousWords.where((w) => url.contains(w)).toList();
-
-    info['TLD'] = domain.split('.').last;
-    info['Протокол'] = url.startsWith('https') ? 'HTTPS' : 'HTTP';
-    info['Содержит слова'] =
-        foundWords.isNotEmpty ? foundWords.join(', ') : '-';
+    info['Содержит слова'] = foundWords.isNotEmpty ? foundWords.join(', ') : '-';
 
     return info;
   }
@@ -475,7 +604,7 @@ class _QRScannerPageState extends State<QRScannerPage> {
 
               try {
                 final realUrl = await resolveFinalUrl(rawValue);
-                final safe = checkIfUrlIsSafe(realUrl);
+                final safe = await checkIfUrlIsSafe(realUrl);
                 final info = await fetchDomainInfo(realUrl);
 
                 if (!mounted) return;
@@ -560,7 +689,7 @@ class _QRScannerPageState extends State<QRScannerPage> {
 
               try {
                 final realUrl = await resolveFinalUrl(rawValue);
-                final safe = checkIfUrlIsSafe(realUrl);
+                final safe = await checkIfUrlIsSafe(realUrl);
                 final info = await fetchDomainInfo(realUrl);
 
                 if (!mounted) return;
@@ -613,6 +742,13 @@ class _QRScannerPageState extends State<QRScannerPage> {
               ),
         );
       }
+    }
+  }
+
+  Future<void> _launchUrl(String url) async {
+    final uri = Uri.parse(url);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri);
     }
   }
 }
