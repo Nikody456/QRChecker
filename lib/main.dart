@@ -8,6 +8,7 @@ import 'package:google_mlkit_barcode_scanning/google_mlkit_barcode_scanning.dart
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:universal_html/html.dart' as html;
 import 'package:logging/logging.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 // Initialize logger
 final _logger = Logger('QRChecker');
@@ -48,11 +49,27 @@ class _QRScannerPageState extends State<QRScannerPage> {
   Map<String, String>? domainInfo;
   final cameraController = MobileScannerController();
   final resolvedLinksCache = <String, String>{};
+  bool isFlashOn = false;
+  bool isBackCamera = true;
+  Rect? qrCodeRect;
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('QR Checker')),
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        title: Text(
+          'QR Checker',
+          style: GoogleFonts.roboto(
+            fontSize: 24,
+            fontWeight: FontWeight.bold,
+            color: Colors.white,
+          ),
+        ),
+        centerTitle: true,
+      ),
       body: Stack(
         children: [
           MobileScanner(
@@ -62,6 +79,16 @@ class _QRScannerPageState extends State<QRScannerPage> {
               final barcode = capture.barcodes.first;
               final rawValue = barcode.rawValue;
               if (rawValue != null && scannedData == null) {
+                // Calculate QR code position
+                final size = MediaQuery.of(context).size;
+                final width = size.width * 0.6;
+                final height = width;
+                final left = (size.width - width) / 2;
+                final top = (size.height - height) / 2;
+                setState(() {
+                  qrCodeRect = Rect.fromLTWH(left, top, width, height);
+                });
+                
                 final realUrl = await resolveFinalUrl(rawValue);
                 final safe = checkIfUrlIsSafe(realUrl);
                 final info = await fetchDomainInfo(realUrl);
@@ -74,30 +101,55 @@ class _QRScannerPageState extends State<QRScannerPage> {
                   domainInfo = info;
                 });
                 cameraController.stop();
+              } else if (rawValue != null) {
+                // Update QR code position while scanning
+                final size = MediaQuery.of(context).size;
+                final width = size.width * 0.6;
+                final height = width;
+                final left = (size.width - width) / 2;
+                final top = (size.height - height) / 2;
+                setState(() {
+                  qrCodeRect = Rect.fromLTWH(left, top, width, height);
+                });
               }
             },
           ),
-          // Add scanning frame overlay
-          Center(
-            child: Container(
-              width: 250,
-              height: 250,
-              decoration: BoxDecoration(
-                border: Border.all(color: Colors.white, width: 2),
-                borderRadius: BorderRadius.circular(12),
+          if (qrCodeRect != null)
+            Positioned.fromRect(
+              rect: qrCodeRect!,
+              child: Container(
+                decoration: BoxDecoration(
+                  border: Border.all(
+                    color: Colors.green,
+                    width: 2,
+                  ),
+                  borderRadius: BorderRadius.circular(8),
+                ),
               ),
             ),
-          ),
           if (isProcessing) const Center(child: CircularProgressIndicator()),
           if (!showDetails && !isProcessing)
             Align(
               alignment: Alignment.bottomCenter,
               child: Padding(
                 padding: const EdgeInsets.all(24),
-                child: FloatingActionButton.extended(
-                  onPressed: pickImageAndScan,
-                  label: const Text('Фото из галереи'),
-                  icon: const Icon(Icons.photo),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    _buildIconButton(
+                      icon: Icons.photo_library,
+                      onPressed: pickImageAndScan,
+                    ),
+                    _buildIconButton(
+                      icon: Icons.flash_on,
+                      onPressed: toggleFlash,
+                      isActive: isFlashOn,
+                    ),
+                    _buildIconButton(
+                      icon: Icons.flip_camera_ios,
+                      onPressed: toggleCamera,
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -107,57 +159,93 @@ class _QRScannerPageState extends State<QRScannerPage> {
     );
   }
 
+  Widget _buildIconButton({
+    required IconData icon,
+    required VoidCallback onPressed,
+    bool isActive = false,
+  }) {
+    return Container(
+      width: 56,
+      height: 56,
+      decoration: BoxDecoration(
+        color: isActive ? Colors.white : Colors.white.withValues(alpha: 0.2 * 255),
+        shape: BoxShape.circle,
+      ),
+      child: IconButton(
+        icon: Icon(
+          icon,
+          color: isActive ? Colors.black : Colors.white,
+          size: 28,
+        ),
+        onPressed: onPressed,
+      ),
+    );
+  }
+
+  void toggleFlash() {
+    setState(() {
+      isFlashOn = !isFlashOn;
+      cameraController.toggleTorch();
+    });
+  }
+
+  void toggleCamera() {
+    setState(() {
+      isBackCamera = !isBackCamera;
+      cameraController.switchCamera();
+    });
+  }
+
   Widget _buildDetailsPanel() {
     return Container(
       margin: const EdgeInsets.only(top: 50),
       padding: const EdgeInsets.all(16),
-      color: Colors.black.withValues(alpha: 0.85),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.85 * 255),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+      ),
       child: ListView(
         padding: EdgeInsets.zero,
         children: [
           Text(
             isSafe == true ? '✅ Ссылка безопасна' : '🚨 Подозрительная ссылка',
-            style: TextStyle(
+            style: GoogleFonts.roboto(
               fontSize: 18,
               fontWeight: FontWeight.bold,
               color: isSafe == true ? Colors.green : Colors.red,
             ),
           ),
-          const SizedBox(height: 12),
-          const Text(
-            'Ссылка в QR-коде:',
-            style: TextStyle(fontWeight: FontWeight.bold),
+          const SizedBox(height: 16),
+          _buildInfoCard(
+            title: 'Ссылка в QR-коде:',
+            content: scannedData ?? '-',
           ),
-          Text(scannedData ?? '-'),
-          const SizedBox(height: 12),
-          if (finalUrl != null && finalUrl != scannedData)
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Реальный адрес назначения:',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                ),
-                Text(finalUrl!, style: const TextStyle(color: Colors.blue)),
-                Text('Редиректов: $redirectCount'),
-              ],
+          if (finalUrl != null && finalUrl != scannedData) ...[
+            const SizedBox(height: 12),
+            _buildInfoCard(
+              title: 'Реальный адрес назначения:',
+              content: finalUrl!,
+              isUrl: true,
             ),
-          const SizedBox(height: 12),
-          if (domainInfo != null)
-            ...domainInfo!.entries.map(
-              (e) => Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    '${e.key}:',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  Text(e.value),
-                  const SizedBox(height: 10),
-                ],
+            const SizedBox(height: 8),
+            Text(
+              'Редиректов: $redirectCount',
+              style: GoogleFonts.roboto(
+                color: Colors.white70,
+                fontSize: 14,
               ),
             ),
-          const SizedBox(height: 12),
+          ],
+          if (domainInfo != null) ...[
+            const SizedBox(height: 16),
+            ...domainInfo!.entries.map(
+              (e) => _buildInfoCard(
+                title: '${e.key}:',
+                content: e.value,
+              ),
+            ),
+          ],
+          const SizedBox(height: 24),
           ElevatedButton(
             onPressed: () {
               setState(() {
@@ -166,10 +254,59 @@ class _QRScannerPageState extends State<QRScannerPage> {
                 isSafe = null;
                 showDetails = false;
                 domainInfo = null;
+                qrCodeRect = null;
               });
               cameraController.start();
             },
-            child: const Text('Сканировать снова'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.white,
+              foregroundColor: Colors.black,
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            child: Text(
+              'Сканировать снова',
+              style: GoogleFonts.roboto(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInfoCard({
+    required String title,
+    required String content,
+    bool isUrl = false,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.1 * 255),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: GoogleFonts.roboto(
+              fontWeight: FontWeight.bold,
+              color: Colors.white70,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            content,
+            style: GoogleFonts.roboto(
+              color: isUrl ? Colors.blue : Colors.white,
+              decoration: isUrl ? TextDecoration.underline : null,
+            ),
           ),
         ],
       ),
