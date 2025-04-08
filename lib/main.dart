@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:google_mlkit_barcode_scanning/google_mlkit_barcode_scanning.dart';
 
 void main() => runApp(const MyApp());
 
@@ -44,20 +46,17 @@ class _QRScannerPageState extends State<QRScannerPage> {
 
   Future<String> resolveFinalUrl(String url) async {
     if (resolvedLinksCache.containsKey(url)) {
-      redirectCount = 1; // считаем как минимум 1 редирект если из кэша
+      redirectCount = 1;
       return resolvedLinksCache[url]!;
     }
-
     String current = url;
     int hops = 0;
-
     while (true) {
       try {
         final response = await http.head(
           Uri.parse(current),
           headers: {'User-Agent': 'curl/7.64.1'},
         );
-
         final location = response.headers['location'];
         if ((response.isRedirect ||
                 response.statusCode == 301 ||
@@ -72,7 +71,6 @@ class _QRScannerPageState extends State<QRScannerPage> {
         break;
       }
     }
-
     redirectCount = hops;
     resolvedLinksCache[url] = current;
     return current;
@@ -142,176 +140,44 @@ class _QRScannerPageState extends State<QRScannerPage> {
     return info;
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Stack(
-        children: [
-          MobileScanner(
-            controller: cameraController,
-            fit: BoxFit.cover,
-            onDetect: (capture) async {
-              final barcode = capture.barcodes.first;
-              final rawValue = barcode.rawValue;
-              if (rawValue != null && scannedData == null) {
-                final realUrl = await resolveFinalUrl(rawValue);
-                final safe = checkIfUrlIsSafe(realUrl);
-                final info = await fetchDomainInfo(realUrl);
-                setState(() {
-                  scannedData = rawValue;
-                  finalUrl = realUrl;
-                  isSafe = safe;
-                  showDetails = true;
-                  domainInfo = info;
-                });
-                cameraController.stop();
-              }
-            },
-          ),
+  Future<void> pickImageAndScan() async {
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(source: ImageSource.gallery);
+    if (picked != null) {
+      final inputImage = InputImage.fromFilePath(picked.path);
+      final scanner = BarcodeScanner();
+      final barcodes = await scanner.processImage(inputImage);
+      scanner.close();
 
-          if (!showDetails)
-            Center(
-              child: Container(
-                width: 250,
-                height: 250,
-                decoration: BoxDecoration(
-                  border: Border.all(color: Colors.greenAccent, width: 2),
+      if (barcodes.isEmpty) {
+        if (context.mounted) {
+          showDialog(
+            context: context,
+            builder:
+                (_) => const AlertDialog(
+                  title: Text('QR-код не найден'),
+                  content: Text('Пожалуйста, выбери другое изображение.'),
                 ),
-              ),
-            ),
+          );
+        }
+        return;
+      }
 
-          if (showDetails && finalUrl != null)
-            Positioned.fill(
-              child: Container(
-                color: Colors.black.withOpacity(0.95),
-                child: Column(
-                  children: [
-                    Container(
-                      width: double.infinity,
-                      color: isSafe! ? Colors.green : Colors.red,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            isSafe! ? Icons.check_circle : Icons.block,
-                            color: Colors.white,
-                          ),
-                          const SizedBox(width: 10),
-                          Text(
-                            isSafe!
-                                ? 'Ссылка безопасна'
-                                : 'Подозрительная ссылка',
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    Expanded(
-                      child: SingleChildScrollView(
-                        padding: const EdgeInsets.all(16),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'Ссылка в QR-коде:',
-                              style: TextStyle(fontWeight: FontWeight.bold),
-                            ),
-                            const SizedBox(height: 6),
-                            Text(
-                              scannedData!,
-                              style: const TextStyle(color: Colors.grey),
-                            ),
-                            const SizedBox(height: 12),
-                            const Text(
-                              'Реальный адрес назначения:',
-                              style: TextStyle(fontWeight: FontWeight.bold),
-                            ),
-                            const SizedBox(height: 6),
-                            InkWell(
-                              onTap: () => launchUrl(finalUrl!),
-                              child: Text(
-                                finalUrl!,
-                                style: const TextStyle(
-                                  color: Colors.blue,
-                                  decoration: TextDecoration.underline,
-                                ),
-                              ),
-                            ),
-                            if (redirectCount > 0)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 8),
-                                child: Text(
-                                  'Редиректов: $redirectCount',
-                                  style: const TextStyle(
-                                    color: Colors.orangeAccent,
-                                  ),
-                                ),
-                              ),
-                            const SizedBox(height: 20),
-                            const Text(
-                              'Информация о сайте:',
-                              style: TextStyle(fontWeight: FontWeight.bold),
-                            ),
-                            const SizedBox(height: 8),
-                            if (domainInfo != null)
-                              ...domainInfo!.entries.map(
-                                (e) => Padding(
-                                  padding: const EdgeInsets.only(bottom: 8),
-                                  child: Row(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        '${e.key}: ',
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                      Expanded(child: Text(e.value)),
-                                    ],
-                                  ),
-                                ),
-                              )
-                            else
-                              const Text('Информация о домене не найдена.'),
-                          ],
-                        ),
-                      ),
-                    ),
-                    SafeArea(
-                      child: Padding(
-                        padding: const EdgeInsets.all(12),
-                        child: SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton(
-                            onPressed: () {
-                              setState(() {
-                                scannedData = null;
-                                finalUrl = null;
-                                isSafe = null;
-                                showDetails = false;
-                                showFullLink = false;
-                                domainInfo = null;
-                                redirectCount = 0;
-                              });
-                              cameraController.start();
-                            },
-                            child: const Text('Сканировать снова'),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
+      final rawValue = barcodes.first.rawValue;
+      if (rawValue != null) {
+        final realUrl = await resolveFinalUrl(rawValue);
+        final safe = checkIfUrlIsSafe(realUrl);
+        final info = await fetchDomainInfo(realUrl);
+        setState(() {
+          scannedData = rawValue;
+          finalUrl = realUrl;
+          isSafe = safe;
+          showDetails = true;
+          domainInfo = info;
+        });
+        cameraController.stop();
+      }
+    }
   }
 
   void launchUrl(String url) {
