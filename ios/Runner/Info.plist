@@ -45,6 +45,10 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Мы используем камеру для сканирования</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Мы используем галерею для выбора изображений с QR-кодами</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Мы используем галерею для выбора изображений с QR-кодами</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 </dict>
